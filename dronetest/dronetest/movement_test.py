@@ -18,8 +18,8 @@ class DroneController(Node):
         # 2. Declare and get parameters for connection and mission
         self.declare_parameter('connection_string', '/dev/ttyS4,921600')
         self.declare_parameter('takeoff_altitude', 2.0)
-        self.declare_parameter('target_latitude', -7.8332903)
-        self.declare_parameter('target_longitude', 110.3843720)
+        self.declare_parameter('target_latitude', -7.8334540)
+        self.declare_parameter('target_longitude', 110.3838480)
         self.declare_parameter('target_altitude', 2.0)
         
         self.connection_string = self.get_parameter('connection_string').get_parameter_value().string_value
@@ -44,45 +44,18 @@ class DroneController(Node):
         # 4. Create Publishers
         self.landing_pub = self.create_publisher(Bool, '/landing_status', 10)
 
-    def set_mode(self, mode):
-        """Set the vehicle mode using MAVLink and wait for confirmation."""
-        mode_mapping = self.vehicle.mode_mapping()
-        if mode not in mode_mapping:
-            self.get_logger().error(f"Unknown mode: {mode}")
-            return False
-        
-        mode_id = mode_mapping[mode]
-        
-        self.vehicle.mav.command_long_send(
-            self.vehicle.target_system, self.vehicle.target_component,
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
-            mode_id, 0, 0, 0, 0, 0, 0
-        )
-        self.get_logger().info(f"Sent command to change mode to {mode}")
-
-        # Wait for the acknowledgment
-        while True:
-            ack_msg = self.vehicle.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
-            if ack_msg is None:
-                self.get_logger().error(f"Timeout waiting for COMMAND_ACK for mode change to {mode}")
-                return False
-            
-            if ack_msg.command == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
-                if ack_msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                    self.get_logger().info(f"Mode change to {mode} accepted.")
-                    return True
-                else:
-                    self.get_logger().error(f"Mode change to {mode} rejected with result {ack_msg.result}")
-                    return False
-
     def arm_and_takeoff(self):
         """Arms the vehicle and takes off to the specified altitude."""
         self.get_logger().info("--- Arm and Takeoff Sequence ---")
 
-        # Set mode to GUIDED
-        if not self.set_mode("GUIDED"):
-            self.get_logger().error("Failed to set mode to GUIDED. Aborting takeoff.")
-            return False
+        # Set mode to GUIDED (mode 4 for Copter) without verification
+        self.get_logger().info("Setting mode to GUIDED...")
+        guided_mode_id = 4 
+        self.vehicle.mav.set_mode_send(
+            self.vehicle.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            guided_mode_id)
+        time.sleep(1) # Give a moment for the mode change to process
 
         # Arm the vehicle
         self.get_logger().info("Sending arm command...")
@@ -101,66 +74,35 @@ class DroneController(Node):
             self.vehicle.target_system, self.vehicle.target_component,
             mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
             0, 0, 0, 0, 0, 0, self.takeoff_altitude)
-
-        # Wait until the vehicle reaches the target altitude
-        self.get_logger().info("Waiting to reach target altitude...")
-        while rclpy.ok():
-            msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=3)
-            if msg:
-                current_altitude = msg.relative_alt / 1000.0
-                self.get_logger().info(f"Current altitude: {current_altitude:.2f}m")
-                if current_altitude >= self.takeoff_altitude * 0.95:
-                    self.get_logger().info("Reached target altitude.")
-                    return True # Success
-            else:
-                self.get_logger().warn("No GLOBAL_POSITION_INT message received. Retrying...")
-            time.sleep(1)
-        return False # Failed if loop is broken by rclpy.ok()
+        time.sleep(10)
 
     def goto_position(self):
         """Commands the drone to fly to the target GPS coordinate."""
         self.get_logger().info(f"--- Go To Position Sequence ---")
         self.get_logger().info(f"Going to LAT:{self.target_lat}, LON:{self.target_lon}, ALT:{self.target_alt}m")
         
-        if not self.set_mode("GUIDED"):
-             self.get_logger().error("Failed to set mode to GUIDED. Aborting goto.")
-             return False
-
+        # The mode should already be GUIDED from the takeoff sequence.
+        # We send the position command directly.
         self.vehicle.mav.set_position_target_global_int_send(
             0, self.vehicle.target_system, self.vehicle.target_component,
             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-            0b0000111111000111, int(self.target_lat * 1e7),
+            3576, int(self.target_lat * 1e7),
             int(self.target_lon * 1e7), self.target_alt,
             0, 0, 0, 0, 0, 0, 0, 0)
-
-        # Wait until the drone reaches the target location
-        while rclpy.ok():
-            msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=3)
-            if not msg:
-                self.get_logger().warn("No GLOBAL_POSITION_INT message received. Cannot check distance.")
-                time.sleep(1)
-                continue
-
-            lat = msg.lat / 1e7
-            lon = msg.lon / 1e7
-            
-            d_lat = (lat - self.target_lat) * 1.113195e5
-            d_lon = (lon - self.target_lon) * 1.113195e5 * math.cos(math.radians(self.target_lat))
-            distance = math.sqrt(d_lat**2 + d_lon**2)
-            
-            self.get_logger().info(f"Distance to target: {distance:.2f}m")
-            if distance < 2.0:
-                self.get_logger().info("Arrived at target coordinates.")
-                return True
-            time.sleep(1)
-        return False
+        time.sleep(10)
 
     def land(self):
         """Lands the vehicle and waits for it to be on the ground."""
         self.get_logger().info("--- Landing Sequence ---")
-        if not self.set_mode("LAND"):
-            self.get_logger().error("Failed to set mode to LAND.")
-            return False
+
+        # Set mode to LAND (mode 9 for Copter) without verification
+        self.get_logger().info("Setting mode to LAND...")
+        land_mode_id = 9
+        self.vehicle.mav.set_mode_send(
+            self.vehicle.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            land_mode_id)
+        time.sleep(1) # Give a moment for the mode change to process
 
         # Publish landing status
         land_status = Bool()
@@ -212,13 +154,13 @@ def main(args=None):
         return
 
     try:
-        # --- Mission Execution ---
-        if drone_controller.arm_and_takeoff():
-            # Go to the target coordinates after successful takeoff
-            if drone_controller.goto_position():
-                # Hold position for a while after reaching target
-                drone_controller.get_logger().info("Holding position for 10 seconds.")
-                time.sleep(10)
+       # --- Mission Execution ---
+       drone_controller.arm_and_takeoff()
+       # Go to the target coordinates after successful takeoff
+       drone_controller.goto_position()
+       # Hold position for a while after reaching target
+       drone_controller.get_logger().info("Holding position for 10 seconds.")
+       time.sleep(5)
 
     except KeyboardInterrupt:
         drone_controller.get_logger().info('Keyboard interrupt, initiating landing.')
