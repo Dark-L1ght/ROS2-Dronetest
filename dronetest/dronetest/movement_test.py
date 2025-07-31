@@ -152,7 +152,11 @@ def main(args=None):
     # Exit if the connection failed in the constructor
     if not rclpy.ok():
         return
-
+        
+    # --- Wait for user to start the mission ---
+    drone_controller.get_logger().info("Connection successful. Node is ready.")
+    input(">>> Press Enter to start the mission <<<")
+    
     try:
        # --- Mission Execution ---
        drone_controller.arm_and_takeoff()
