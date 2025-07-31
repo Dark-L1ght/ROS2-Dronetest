@@ -168,7 +168,7 @@ class DroneController(Node):
         land_status = Bool()
         land_status.data = True
         self.landing_pub.publish(land_status)
-
+        msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
         # Wait for the drone to land
         self.get_logger().info("Waiting for drone to land...")
         # Check if altitude is very low
