@@ -18,20 +18,18 @@ class DroneController(Node):
         # 2. Declare and get parameters for connection and mission
         self.declare_parameter('connection_string', 'udp:127.0.0.1:14551')
         self.declare_parameter('takeoff_altitude', 2.0)
-        self.declare_parameter('target_latitude', -7.8332205)
-        self.declare_parameter('target_longitude', 110.3844444)
-        self.declare_parameter('target2_latitude', -7.8332610)
-        self.declare_parameter('target2_longitude', 110.3846580)
-        self.declare_parameter('target_altitude', 2.0)
-        
-        self.connection_string = self.get_parameter('connection_string').get_parameter_value().string_value
-        self.takeoff_altitude = self.get_parameter('takeoff_altitude').get_parameter_value().double_value
-        self.target_lat = self.get_parameter('target_latitude').get_parameter_value().double_value
-        self.target_lon = self.get_parameter('target_longitude').get_parameter_value().double_value
-        self.target2_lat = self.get_parameter('target2_latitude').get_parameter_value().double_value
-        self.target2_lon = self.get_parameter('target2_longitude').get_parameter_value().double_value
-        self.target_alt = self.get_parameter('target_altitude').get_parameter_value().double_value
 
+        self.declare_parameter('waypoint1_lat', -7.8332205)
+        self.declare_parameter('waypoint1_lon', 110.3844444)
+        self.declare_parameter('waypoint2_lat', -7.8332610)
+        self.declare_parameter('waypoint2_lon', 110.3846580)
+    
+        self.connection_string = self.get_parameter('connection_string').value
+        self.takeoff_altitude = self.get_parameter('takeoff_altitude').value
+        self.wp1_lat = self.get_parameter('waypoint1_lat').value
+        self.wp1_lon = self.get_parameter('waypoint1_lon').value
+        self.wp2_lat = self.get_parameter('waypoint2_lat').value
+        self.wp2_lon = self.get_parameter('waypoint2_lon').value
 
         self.vehicle = None # Initialize vehicle to None
 
@@ -49,22 +47,29 @@ class DroneController(Node):
         # 4. Create Publishers
         self.landing_pub = self.create_publisher(Bool, '/landing_status', 10)
 
-    def get_distance_metres(self, aLocation1, aLocation2):
+    def get_distance_haversine_int(self, location_int_1, location_int_2):
         """
-        Returns the ground distance in metres between two LocationGlobal objects.
-        This method is an approximation, and will not be accurate over large distances and close to the earth's poles.
-        It comes from the ArduPilot test code:
-        https://github.com/ArduPilot/ardupilot/blob/master/Tools/autotest/common.py
+        Calculates distance between two MAVLink_global_position_int_message objects.
         """
-        dlat = aLocation2.lat - aLocation1.lat
-        dlong = aLocation2.lon - aLocation1.lon
-        return math.sqrt((dlat*dlat) + (dlong*dlong)) * 1.113195e5
+        R = 6371000  # Radius of Earth in meters
+        lat1 = location_int_1.lat / 1e7
+        lon1 = location_int_1.lon / 1e7
+        lat2 = location_int_2.lat / 1e7
+        lon2 = location_int_2.lon / 1e7
 
-    def arm_and_takeoff(self,aTargetAltitude):
+        lat1_rad, lon1_rad = math.radians(lat1), math.radians(lon1)
+        lat2_rad, lon2_rad = math.radians(lat2), math.radians(lon2)
+        dlon_rad, dlat_rad = lon2_rad - lon1_rad, lat2_rad - lat1_rad
+
+        a = math.sin(dlat_rad / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon_rad / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    def arm_and_takeoff(self,target_altitude):
         """Arms the vehicle and takes off to the specified altitude."""
         self.get_logger().info("--- Arm and Takeoff Sequence ---")
 
-        # Set mode to GUIDED (mode 4 for Copter) without verification
+        # Set mode to GUIDED (mode 4 for Copter)
         self.get_logger().info("Setting mode to GUIDED...")
         guided_mode_id = 4
         self.vehicle.mav.set_mode_send(
@@ -90,6 +95,7 @@ class DroneController(Node):
             self.vehicle.target_system, self.vehicle.target_component,
             mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
             0, 0, 0, 0, 0, 0, self.takeoff_altitude)
+        time.sleep(1) # Give drone a moment to start ascending
 
         while True:
             # Wait for the GLOBAL_POSITION_INT message
@@ -101,83 +107,64 @@ class DroneController(Node):
             # altitude is in millimeters
             current_altitude = msg.distance
             self.get_logger().info(f"Altitude: {current_altitude:.2f}m")
-            if current_altitude >= aTargetAltitude * 0.90:
+            if current_altitude >= target_altitude * 0.90:
                 self.get_logger().info("Reached target altitude!")
                 break
-            time.sleep(1)
 
-    def goto_position(self,lat,lon):
-        """Commands the drone to fly to the target GPS coordinate."""
-        self.get_logger().info(f"--- Go To Position Sequence ---")
-        self.get_logger().info(f"Going to LAT:{lat}, LON:{lon}, ALT:{self.target_alt}m")
+    def goto_position(self, lat, lon, alt, timeout=30):
+        """
+        Commands the drone to a specific lat/lon/alt and waits for arrival.
+        Returns True on success, False on timeout.
+        """
+        self.get_logger().info(f"--- Commanding drone to LAT:{lat}, LON:{lon}, ALT:{alt}m ---")
         
-        # The mode should already be GUIDED from the takeoff sequence.
-        # We send the position command directly.
+        # Send the command to go to the waypoint
         self.vehicle.mav.set_position_target_global_int_send(
             0, self.vehicle.target_system, self.vehicle.target_component,
             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-            3576, int(self.target_lat * 1e7),
-            int(self.target_lon * 1e7), self.target_alt,
-            0, 0, 0, 0, 0, 0, 0, 0)
-        time.sleep(10)
-        self.vehicle.mav.set_position_target_global_int_send(
-            0, self.vehicle.target_system, self.vehicle.target_component,
-            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-            3576, int(self.target2_lat * 1e7),
-            int(self.target2_lon * 1e7), self.target_alt,
-            0, 0, 0, 0, 0, 0, 0, 0)
+            3576, # type_mask 3576 (use position only)
+            int(lat * 1e7),
+            int(lon * 1e7),
+            alt, 0, 0, 0, 0, 0, 0, 0, 0)
+        
         target_location = mavutil.mavlink.MAVLink_global_position_int_message(0,int(lat*1e7),int(lon*1e7),0,0,0,0,0,0)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
+            if not msg:
+                self.get_logger().warn("No position update received in 1 second.")
+                continue
 
-        #while True:
-        #    msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
-        #    if not msg:
-        #        self.get_logger().error("Did not receive GLOBAL_POSITION_INT message.")
-        #        continue
+            distance = self.get_distance_haversine_int(msg, target_location)
+            self.get_logger().info(f"Distance to target: {distance:.2f}m")
+            
+            if distance <= 1.5: # Arrival tolerance of 1.5 meters
+                self.get_logger().info("Reached target location!")
+                return True
 
-        #    current_location = mavutil.mavlink.MAVLink_global_position_int_message(0,msg.lat,msg.lon,0,0,0,0,0,0)
-         #   distance = self.get_distance_metres(current_location, target_location)
-          #  self.get_logger().info(f"Distance to target: {distance:.2f}m")
-           # 
-           # if distance <= 1.0: # Set a tolerance of 1 meter
-            #    self.get_logger().info("Reached target location!")
-             #   break
-        time.sleep(10)
+        self.get_logger().error(f"Failed to reach target within {timeout} seconds.")
+        return False
 
     def land(self):
-        """Lands the vehicle and waits for it to be on the ground."""
+        """Lands the vehicle and confirms it has landed."""
         self.get_logger().info("--- Landing Sequence ---")
-
-        # Set mode to LAND (mode 9 for Copter) without verification
-        self.get_logger().info("Setting mode to LAND...")
-        land_mode_id = 9
         self.vehicle.mav.set_mode_send(
             self.vehicle.target_system,
-            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            land_mode_id)
-        time.sleep(1) # Give a moment for the mode change to process
-
-        # Wait for mode change confirmation
-        ack = self.vehicle.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
-        if ack and ack.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
-            self.get_logger().info("Mode set to LAND successfully.")
-        else:
-            self.get_logger().error("Failed to set mode to LAND.")
-            return
-
-        # Publish landing status
-        land_status = Bool()
-        land_status.data = True
-        self.landing_pub.publish(land_status)
-        msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
-        # Wait for the drone to land
-        self.get_logger().info("Waiting for drone to land...")
-        # Check if altitude is very low
-        current_altitude = msg.relative_alt / 1000.0
-        if current_altitude < 0.2:
-            self.get_logger().info("Drone has landed.")
-            return True
-        time.sleep(1)
-        return False
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 9) # 9 is LAND for Copter
+        
+        # Wait until the vehicle is on the ground
+        while True:
+            msg = self.vehicle.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
+            if not msg: continue
+            
+            # Check if altitude is near zero and not moving
+            if msg.relative_alt < 200: # relative_alt is in mm, so 200mm = 0.2m
+                self.get_logger().info("Drone has landed.")
+                land_status = Bool()
+                land_status.data = True
+                self.landing_pub.publish(land_status)
+                break
+            time.sleep(1)
 
     def disarm(self):
         """Disarms the vehicle."""
@@ -206,19 +193,20 @@ def main(args=None):
     if not rclpy.ok():
         return
     
-    drone_controller.get_logger().info("Connection Successfull. Node is Ready")
+    drone_controller.get_logger().info("Connection Successfull. Mission is Ready")
     input("Press ENTER to start")
 
     try:
-       # --- Mission Execution ---
-       drone_controller.arm_and_takeoff(drone_controller.takeoff_altitude)
-       # Go to the target coordinates after successful takeoff
-       drone_controller.goto_position(drone_controller.target_lat,drone_controller.target_lon)
-       # Hold position for a while after reaching target
-       drone_controller.get_logger().info("Holding position for 10 seconds.")
-       time.sleep(5)
-
-
+        # <<< MODIFIED >>> Use the new function for multiple waypoints
+        drone_controller.get_logger().info("--- Flying to Waypoint 1 ---")
+        if drone_controller.goto_position(drone_controller.wp1_lat, drone_controller.wp1_lon, drone_controller.takeoff_altitude):
+            drone_controller.get_logger().info("Holding position at Waypoint 1 for 5 seconds.")
+            time.sleep(5)
+        
+        drone_controller.get_logger().info("--- Flying to Waypoint 2 ---")
+        if drone_controller.goto_position(drone_controller.wp2_lat, drone_controller.wp2_lon, drone_controller.takeoff_altitude):
+            drone_controller.get_logger().info("Holding position at Waypoint 2 for 5 seconds.")
+            time.sleep(5)
 
     except KeyboardInterrupt:
         drone_controller.get_logger().info('Keyboard interrupt, initiating landing.')
